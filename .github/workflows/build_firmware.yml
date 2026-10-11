@@ -32,7 +32,12 @@ jobs:
 
       - name: Build ${{ inputs.platform }}
         id: build
-        uses: meshtastic/gh-action-firmware@main
+        # Pinned to the last commit before upstream's 2026-10-10 SCons/PlatformIO
+        # install rework (975194c "Install PIO with uv, enforce constraints" and
+        # follow-ups), which broke the ESP32 link step with
+        # "ModuleNotFoundError: No module named 'SCons.Tool.FortranCommon'".
+        # @main built fine as of 2026-10-09; revisit once upstream fixes it.
+        uses: meshtastic/gh-action-firmware@f06a3dcfbcd7c55f3373396c4254339d537cfa1f
         with:
           pio_platform: ${{ inputs.platform }}
           pio_env: ${{ inputs.pio_env }}
