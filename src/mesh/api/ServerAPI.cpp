@@ -6,6 +6,7 @@
 #include "Throttle.h"
 #include "concurrency/LockGuard.h"
 #include <Arduino.h>
+#include <algorithm>
 #include <cstdlib>
 #include <new>
 
@@ -107,9 +108,11 @@ template <class T, class U> void APIServerPort<T, U>::init()
 
 template <class T, class U> int32_t APIServerPort<T, U>::runOnce()
 {
-    // Clean up previous connection if its client already disconnected
-    if (openAPI && !openAPI->checkIsConnected()) {
-        openAPI.reset();
+    // Clean up any slots whose client already disconnected
+    for (auto &slot : openAPI) {
+        if (slot && !slot->checkIsConnected()) {
+            slot.reset();
+        }
     }
 
 #ifdef ARCH_ESP32
@@ -124,38 +127,40 @@ template <class T, class U> int32_t APIServerPort<T, U>::runOnce()
     auto client = U::available();
 #endif
     if (client) {
-        // Close any previous connection (see FIXME in header file)
-        if (openAPI) {
+        // Find a free slot for this new connection; existing connections are left running (see
+        // MAX_API_CLIENTS comment in the header - this used to force-close whatever was already open).
+        auto freeSlot = std::find_if(std::begin(openAPI), std::end(openAPI), [](auto &slot) { return !slot; });
+        if (freeSlot == std::end(openAPI)) {
 #if RAK_4631
             // RAK13800 Ethernet requests periodically take more time
             // This backoff addresses most cases keeping max wait < 1s
             // Reconnections are delayed by full wait time
             if (waitTime < 400) {
                 waitTime *= 2;
-                LOG_INFO("Previous TCP connection still open, try again in %dms", waitTime);
+                LOG_INFO("All %u API connection slots busy, try again in %dms", (unsigned)MAX_API_CLIENTS, waitTime);
                 return waitTime;
             }
 #endif
-            LOG_INFO("Force close previous TCP connection");
-            openAPI.reset();
-        }
-
-        // A ServerAPI carries the stream rx/tx buffers plus the FromRadio/ToRadio scratch, several
-        // KB in one block. On ESP32 a new that cannot get that block is a reboot (see the note on
-        // openAPI in the header), and std::nothrow does not help there because libstdc++ builds it
-        // on the throwing form. malloc() does return nullptr, so take the block from malloc() and
-        // construct in place; if there is no room drop this connection instead of the node - the
-        // client retries and the next accept gets a fresh look at the heap. The T constructors do
-        // not allocate (default-constructed containers, fixed-size thread table), so nothing inside
-        // the placement new can throw either.
-        void *block = malloc(sizeof(T));
-        if (!block) {
-            LOG_ERROR("No heap for API connection (%u bytes), dropping client", (unsigned)sizeof(T));
+            LOG_WARN("All %u API connection slots busy, dropping new client", (unsigned)MAX_API_CLIENTS);
             client.stop();
         } else {
-            openAPI.reset(new (block) T(client));
+            // A ServerAPI carries the stream rx/tx buffers plus the FromRadio/ToRadio scratch, several
+            // KB in one block. On ESP32 a new that cannot get that block is a reboot (see the note on
+            // openAPI in the header), and std::nothrow does not help there because libstdc++ builds it
+            // on the throwing form. malloc() does return nullptr, so take the block from malloc() and
+            // construct in place; if there is no room drop this connection instead of the node - the
+            // client retries and the next accept gets a fresh look at the heap. The T constructors do
+            // not allocate (default-constructed containers, fixed-size thread table), so nothing inside
+            // the placement new can throw either.
+            void *block = malloc(sizeof(T));
+            if (!block) {
+                LOG_ERROR("No heap for API connection (%u bytes), dropping client", (unsigned)sizeof(T));
+                client.stop();
+            } else {
+                freeSlot->reset(new (block) T(client));
+            }
+            // cppcheck-suppress memleak ; block is owned by *freeSlot via placement new, freed by MallocDeleter
         }
-        // cppcheck-suppress memleak ; block is owned by openAPI via placement new, freed by MallocDeleter
     }
 
 #if RAK_4631

@@ -49,10 +49,14 @@ template <class T> class ServerAPI : public StreamAPI, private concurrency::OSTh
  */
 template <class T, class U> class APIServerPort : public U, private concurrency::OSThread
 {
-    /** The currently open port
+    /** Up to MAX_API_CLIENTS concurrently open connections.
      *
-     * FIXME: We currently only allow one open TCP connection at a time, because we depend on the loop() call in this class to
-     * delegate to the worker.  Once coroutines are implemented we can relax this restriction.
+     * Each ServerAPI<T> instance is already its own OSThread with its own read cursor into the shared
+     * packet/NodeDB state (the same pattern used for Serial/BLE), so holding several alive at once needs
+     * no extra synchronization here - this class's own job is just accept()/cleanup bookkeeping. A fixed
+     * slot count (rather than a single pointer) lets e.g. the phone app, a local automation bridge, and
+     * Home Assistant all hold a WiFi API connection to the same node at the same time instead of each one
+     * kicking the others off, which was the original one-at-a-time behavior here.
      *
      * The ServerAPI is built in a malloc()'d block with placement new rather than operator new: on ESP32 the framework
      * is compiled with CONFIG_COMPILER_CXX_EXCEPTIONS=n and every throw is wrapped to abort(), which makes a failed
@@ -69,7 +73,8 @@ template <class T, class U> class APIServerPort : public U, private concurrency:
             }
         }
     };
-    std::unique_ptr<T, MallocDeleter> openAPI;
+    static constexpr size_t MAX_API_CLIENTS = 3;
+    std::unique_ptr<T, MallocDeleter> openAPI[MAX_API_CLIENTS];
 #if defined(RAK_4631) || defined(RAK11310)
     // Track wait time for RAK13800 Ethernet requests
     int32_t waitTime = 100;
